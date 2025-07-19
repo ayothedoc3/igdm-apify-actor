@@ -1,21 +1,28 @@
 import { NextResponse } from "next/server"
-import { getDatabase } from "@/lib/database"
+import { getDatabase, initializeTables } from "@/lib/database"
 
 export async function GET() {
   try {
-    const db = getDatabase()
+    const sql = getDatabase()
 
-    const runs = db
-      .prepare(`
+    // Initialize tables if they don't exist
+    await initializeTables()
+
+    const runs = await sql`
       SELECT * FROM scrape_runs 
       ORDER BY created_at DESC 
       LIMIT 50
-    `)
-      .all()
+    `
 
     return NextResponse.json(runs || [])
   } catch (error) {
     console.error("Error fetching scrape runs:", error)
-    return NextResponse.json({ error: "Failed to fetch scrape runs" }, { status: 500 })
+    return NextResponse.json(
+      {
+        error: "Failed to fetch scrape runs",
+        details: error.message,
+      },
+      { status: 500 },
+    )
   }
 }

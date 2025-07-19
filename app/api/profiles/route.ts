@@ -1,23 +1,30 @@
 import { NextResponse } from "next/server"
-import { getDatabase } from "@/lib/database"
+import { getDatabase, initializeTables } from "@/lib/database"
 
 export async function GET() {
   try {
-    const db = getDatabase()
+    const sql = getDatabase()
 
-    const profiles = db
-      .prepare(`
+    // Initialize tables if they don't exist
+    await initializeTables()
+
+    const profiles = await sql`
       SELECT p.*, s.name as session_name
       FROM profiles p
       LEFT JOIN sessions s ON p.assigned_session_id = s.id
       ORDER BY p.created_at DESC
       LIMIT 1000
-    `)
-      .all()
+    `
 
     return NextResponse.json(profiles || [])
   } catch (error) {
     console.error("Error fetching profiles:", error)
-    return NextResponse.json({ error: "Failed to fetch profiles" }, { status: 500 })
+    return NextResponse.json(
+      {
+        error: "Failed to fetch profiles",
+        details: error.message,
+      },
+      { status: 500 },
+    )
   }
 }

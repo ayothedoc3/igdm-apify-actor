@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Trash2, Plus, Settings, AlertCircle, CheckCircle } from "lucide-react"
+import { Trash2, Plus, Settings, AlertCircle, CheckCircle, RefreshCw } from "lucide-react"
 import { useToast } from "@/hooks/use-toast"
 
 interface Session {
@@ -29,6 +29,7 @@ export default function SessionManager() {
     type: "scraper" as "scraper" | "sender",
   })
   const [loading, setLoading] = useState(false)
+  const [fetchLoading, setFetchLoading] = useState(true)
   const { toast } = useToast()
 
   useEffect(() => {
@@ -36,21 +37,30 @@ export default function SessionManager() {
   }, [])
 
   const fetchSessions = async () => {
+    setFetchLoading(true)
     try {
       const response = await fetch("/api/sessions")
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`)
       }
       const data = await response.json()
+
+      // Handle both success and error responses
+      if (data.error) {
+        throw new Error(data.error)
+      }
+
       setSessions(Array.isArray(data) ? data : [])
     } catch (error) {
       console.error("Failed to fetch sessions:", error)
       toast({
-        title: "Error",
+        title: "Database Connection Error",
         description: "Failed to fetch sessions. Please check your database connection.",
         variant: "destructive",
       })
       setSessions([])
+    } finally {
+      setFetchLoading(false)
     }
   }
 
@@ -117,6 +127,15 @@ export default function SessionManager() {
         variant: "destructive",
       })
     }
+  }
+
+  if (fetchLoading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <RefreshCw className="w-6 h-6 animate-spin mr-2" />
+        <span>Loading sessions...</span>
+      </div>
+    )
   }
 
   const scraperSessions = sessions.filter((s) => s.type === "scraper")
@@ -268,7 +287,7 @@ export default function SessionManager() {
         ))}
       </div>
 
-      {sessions.length === 0 && (
+      {sessions.length === 0 && !fetchLoading && (
         <div className="text-center py-8 text-gray-500">
           <Settings className="w-12 h-12 mx-auto mb-4 opacity-50" />
           <p>No Instagram sessions configured yet.</p>

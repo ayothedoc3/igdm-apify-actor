@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from "next/server"
-import { getDatabase } from "@/lib/database"
+import { getDatabase, initializeTables } from "@/lib/database"
 import { ApifyClient } from "apify-client"
 
 const client = new ApifyClient({
@@ -18,20 +18,28 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Apify API token not configured" }, { status: 500 })
     }
 
-    const db = getDatabase()
+    const sql = getDatabase()
+
+    // Initialize tables if they don't exist
+    await initializeTables()
 
     // Get session details
-    const session = db.prepare('SELECT * FROM sessions WHERE id = ? AND type = "scraper"').get(sessionId)
+    const sessions = await sql`
+      SELECT * FROM sessions 
+      WHERE id = ${sessionId} AND type = 'scraper'
+    `
+
+    const session = sessions[0]
     if (!session) {
       return NextResponse.json({ error: "Invalid scraper session" }, { status: 400 })
     }
 
     // Create scrape run record
     const runId = crypto.randomUUID()
-    db.prepare(`
+    await sql`
       INSERT INTO scrape_runs (id, target_username, scrape_type, max_items, session_id, session_name, status, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now'))
-    `).run(runId, targetUsername, scrapeType, maxItems, sessionId, session.name)
+      VALUES (${runId}, ${targetUsername}, ${scrapeType}, ${maxItems}, ${sessionId}, ${session.name}, 'pending', NOW())
+    `
 
     try {
       // Start Apify actor
@@ -43,7 +51,11 @@ export async function POST(request: NextRequest) {
       })
 
       // Update run with Apify run ID
-      db.prepare('UPDATE scrape_runs SET apify_run_id = ?, status = "running" WHERE id = ?').run(run.id, runId)
+      await sql`
+        UPDATE scrape_runs 
+        SET apify_run_id = ${run.id}, status = 'running' 
+        WHERE id = ${runId}
+      `
 
       // Start monitoring the run
       setTimeout(() => monitorScrapeRun(runId, run.id), 10000)
@@ -58,10 +70,11 @@ export async function POST(request: NextRequest) {
       console.error("Apify API error:", apifyError)
 
       // Update run status to failed
-      db.prepare('UPDATE scrape_runs SET status = "failed", error = ? WHERE id = ?').run(
-        apifyError.message || "Apify API error",
-        runId,
-      )
+      await sql`
+        UPDATE scrape_runs 
+        SET status = 'failed', error = ${apifyError.message || "Apify API error"} 
+        WHERE id = ${runId}
+      `
 
       return NextResponse.json(
         {
@@ -73,12 +86,18 @@ export async function POST(request: NextRequest) {
     }
   } catch (error) {
     console.error("Error starting scrape:", error)
-    return NextResponse.json({ error: "Failed to start scraping" }, { status: 500 })
+    return NextResponse.json(
+      {
+        error: "Failed to start scraping",
+        details: error.message,
+      },
+      { status: 500 },
+    )
   }
 }
 
 async function monitorScrapeRun(runId: string, apifyRunId: string) {
-  const db = getDatabase()
+  const sql = getDatabase()
 
   try {
     // Wait for the run to complete
@@ -103,10 +122,11 @@ async function monitorScrapeRun(runId: string, apifyRunId: string) {
           const followingCount = item.followingCount || item.following || item.user?.followingCount || 0
 
           if (username) {
-            db.prepare(`
-              INSERT OR IGNORE INTO profiles (id, username, full_name, profile_pic, bio, followers_count, following_count, scrape_run_id, status, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'not_generated', datetime('now'))
-            `).run(profileId, username, fullName, profilePic, bio, followersCount, followingCount, runId)
+            await sql`
+              INSERT INTO profiles (id, username, full_name, profile_pic, bio, followers_count, following_count, scrape_run_id, status, created_at)
+              VALUES (${profileId}, ${username}, ${fullName}, ${profilePic}, ${bio}, ${followersCount}, ${followingCount}, ${runId}, 'not_generated', NOW())
+              ON CONFLICT (username) DO NOTHING
+            `
             itemsProcessed++
           }
         } catch (insertError) {
@@ -115,21 +135,28 @@ async function monitorScrapeRun(runId: string, apifyRunId: string) {
       }
 
       // Update run status
-      db.prepare(
-        'UPDATE scrape_runs SET status = "completed", items_scraped = ?, completed_at = datetime("now") WHERE id = ?',
-      ).run(itemsProcessed, runId)
+      await sql`
+        UPDATE scrape_runs 
+        SET status = 'completed', items_scraped = ${itemsProcessed}, completed_at = NOW() 
+        WHERE id = ${runId}
+      `
 
       console.log(`Scraping completed: ${itemsProcessed} profiles saved`)
     } else {
       // Handle failure
-      db.prepare('UPDATE scrape_runs SET status = "failed", error = ? WHERE id = ?').run(
-        run.statusMessage || "Scraping failed",
-        runId,
-      )
+      await sql`
+        UPDATE scrape_runs 
+        SET status = 'failed', error = ${run.statusMessage || "Scraping failed"} 
+        WHERE id = ${runId}
+      `
       console.error("Scraping failed:", run.statusMessage)
     }
   } catch (error) {
     console.error("Error monitoring scrape run:", error)
-    db.prepare('UPDATE scrape_runs SET status = "failed", error = ? WHERE id = ?').run(error.message, runId)
+    await sql`
+      UPDATE scrape_runs 
+      SET status = 'failed', error = ${error.message} 
+      WHERE id = ${runId}
+    `
   }
 }
