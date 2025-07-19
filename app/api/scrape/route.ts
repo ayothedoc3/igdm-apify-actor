@@ -8,9 +8,10 @@ const client = new ApifyClient({
 
 export async function POST(request: NextRequest) {
   try {
-    const { targetUsername, scrapeType, maxItems, sessionId } = await request.json()
+    const { usernames, scrapeType, maxItems, sessionId, sessionCookie, proxy, runOptions, advanced } =
+      await request.json()
 
-    if (!targetUsername || !sessionId) {
+    if (!usernames || usernames.length === 0 || !sessionId) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 })
     }
 
@@ -19,8 +20,6 @@ export async function POST(request: NextRequest) {
     }
 
     const sql = getDatabase()
-
-    // Initialize tables if they don't exist
     await initializeTables()
 
     // Get session details
@@ -34,47 +33,89 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Invalid scraper session" }, { status: 400 })
     }
 
-    // Create scrape run record
-    const runId = crypto.randomUUID()
-    await sql`
-      INSERT INTO scrape_runs (id, target_username, scrape_type, max_items, session_id, session_name, status, created_at)
-      VALUES (${runId}, ${targetUsername}, ${scrapeType}, ${maxItems}, ${sessionId}, ${session.name}, 'pending', NOW())
-    `
+    // Use custom session cookie if provided, otherwise use session's cookie
+    const finalSessionCookie = sessionCookie || session.session_id
+
+    // Create scrape run record for each username
+    const runIds = []
+    for (const username of usernames) {
+      const runId = crypto.randomUUID()
+      await sql`
+        INSERT INTO scrape_runs (id, target_username, scrape_type, max_items, session_id, session_name, status, created_at)
+        VALUES (${runId}, ${username}, ${scrapeType}, ${maxItems}, ${sessionId}, ${session.name}, 'pending', NOW())
+      `
+      runIds.push(runId)
+    }
 
     try {
-      // Start Apify actor
-      const run = await client.actor("apify/instagram-scraper").call({
-        usernames: [targetUsername],
+      // Prepare Apify actor input
+      const actorInput = {
+        usernames: usernames,
         resultsType: scrapeType === "followers" ? "followers" : "following",
-        resultsLimit: maxItems,
-        proxy: { useApifyProxy: true },
+        resultsLimit: maxItems || 0,
+        sessionCookie: finalSessionCookie,
+
+        // Proxy configuration
+        proxy: proxy.useApifyProxy
+          ? {
+              useApifyProxy: true,
+              proxyConfiguration: {
+                groups: proxy.proxyType === "residential" ? ["RESIDENTIAL"] : ["DATACENTER"],
+                countryCode: proxy.proxyCountry,
+              },
+            }
+          : {
+              useApifyProxy: false,
+              proxyUrls: proxy.customProxies || [],
+            },
+
+        // Advanced options
+        includePrivateProfiles: advanced?.includePrivateProfiles || false,
+        includeBusinessAccounts: advanced?.includeBusinessAccounts !== false,
+        includeVerifiedAccounts: advanced?.includeVerifiedAccounts !== false,
+        minFollowers: advanced?.minFollowers || 0,
+        maxFollowers: advanced?.maxFollowers || 0,
+
+        // Run options
+        timeout: runOptions?.timeout || 3600,
+        memory: runOptions?.memory || 1024,
+      }
+
+      // Start Apify actor
+      const run = await client.actor("apify/instagram-scraper").call(actorInput, {
+        timeout: runOptions?.timeout || 3600,
+        memory: runOptions?.memory || 1024,
       })
 
-      // Update run with Apify run ID
-      await sql`
-        UPDATE scrape_runs 
-        SET apify_run_id = ${run.id}, status = 'running' 
-        WHERE id = ${runId}
-      `
+      // Update all runs with Apify run ID
+      for (const runId of runIds) {
+        await sql`
+          UPDATE scrape_runs 
+          SET apify_run_id = ${run.id}, status = 'running' 
+          WHERE id = ${runId}
+        `
+      }
 
       // Start monitoring the run
-      setTimeout(() => monitorScrapeRun(runId, run.id), 10000)
+      setTimeout(() => monitorScrapeRun(runIds, run.id), 10000)
 
       return NextResponse.json({
         success: true,
-        runId,
+        runIds,
         apifyRunId: run.id,
-        message: "Scraping started successfully! Results will appear in a few minutes.",
+        message: `Scraping started for ${usernames.length} username(s). Results will appear in a few minutes.`,
       })
     } catch (apifyError) {
       console.error("Apify API error:", apifyError)
 
-      // Update run status to failed
-      await sql`
-        UPDATE scrape_runs 
-        SET status = 'failed', error = ${apifyError.message || "Apify API error"} 
-        WHERE id = ${runId}
-      `
+      // Update all runs status to failed
+      for (const runId of runIds) {
+        await sql`
+          UPDATE scrape_runs 
+          SET status = 'failed', error = ${apifyError.message || "Apify API error"} 
+          WHERE id = ${runId}
+        `
+      }
 
       return NextResponse.json(
         {
@@ -96,7 +137,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-async function monitorScrapeRun(runId: string, apifyRunId: string) {
+async function monitorScrapeRun(runIds: string[], apifyRunId: string) {
   const sql = getDatabase()
 
   try {
@@ -122,9 +163,10 @@ async function monitorScrapeRun(runId: string, apifyRunId: string) {
           const followingCount = item.followingCount || item.following || item.user?.followingCount || 0
 
           if (username) {
+            // Use the first runId as the scrape_run_id (they're all from the same scrape)
             await sql`
               INSERT INTO profiles (id, username, full_name, profile_pic, bio, followers_count, following_count, scrape_run_id, status, created_at)
-              VALUES (${profileId}, ${username}, ${fullName}, ${profilePic}, ${bio}, ${followersCount}, ${followingCount}, ${runId}, 'not_generated', NOW())
+              VALUES (${profileId}, ${username}, ${fullName}, ${profilePic}, ${bio}, ${followersCount}, ${followingCount}, ${runIds[0]}, 'not_generated', NOW())
               ON CONFLICT (username) DO NOTHING
             `
             itemsProcessed++
@@ -134,29 +176,35 @@ async function monitorScrapeRun(runId: string, apifyRunId: string) {
         }
       }
 
-      // Update run status
-      await sql`
-        UPDATE scrape_runs 
-        SET status = 'completed', items_scraped = ${itemsProcessed}, completed_at = NOW() 
-        WHERE id = ${runId}
-      `
+      // Update all runs status
+      for (const runId of runIds) {
+        await sql`
+          UPDATE scrape_runs 
+          SET status = 'completed', items_scraped = ${itemsProcessed}, completed_at = NOW() 
+          WHERE id = ${runId}
+        `
+      }
 
       console.log(`Scraping completed: ${itemsProcessed} profiles saved`)
     } else {
       // Handle failure
-      await sql`
-        UPDATE scrape_runs 
-        SET status = 'failed', error = ${run.statusMessage || "Scraping failed"} 
-        WHERE id = ${runId}
-      `
+      for (const runId of runIds) {
+        await sql`
+          UPDATE scrape_runs 
+          SET status = 'failed', error = ${run.statusMessage || "Scraping failed"} 
+          WHERE id = ${runId}
+        `
+      }
       console.error("Scraping failed:", run.statusMessage)
     }
   } catch (error) {
     console.error("Error monitoring scrape run:", error)
-    await sql`
-      UPDATE scrape_runs 
-      SET status = 'failed', error = ${error.message} 
-      WHERE id = ${runId}
-    `
+    for (const runId of runIds) {
+      await sql`
+        UPDATE scrape_runs 
+        SET status = 'failed', error = ${error.message} 
+        WHERE id = ${runId}
+      `
+    }
   }
 }

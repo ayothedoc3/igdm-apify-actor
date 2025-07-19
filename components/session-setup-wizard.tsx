@@ -421,7 +421,14 @@ export default function SessionSetupWizard() {
               <Button variant="outline" onClick={() => setActiveStep(2)} className="flex-1">
                 Add More Accounts
               </Button>
-              <Button onClick={() => (window.location.href = "#scraping")} className="flex-1">
+              <Button
+                onClick={() => {
+                  // Navigate to scraping tab
+                  const event = new CustomEvent("navigate-to-tab", { detail: "scraping" })
+                  window.dispatchEvent(event)
+                }}
+                className="flex-1"
+              >
                 Start Scraping Now! 🚀
               </Button>
             </div>

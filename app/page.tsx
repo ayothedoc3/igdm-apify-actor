@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import SessionManager from "@/components/session-manager"
@@ -14,6 +14,18 @@ import { Instagram, Users, MessageSquare, Calendar, BarChart3, Settings, Zap } f
 
 export default function HomePage() {
   const [activeTab, setActiveTab] = useState("quick-setup")
+
+  useEffect(() => {
+    const handleNavigateToTab = (event: CustomEvent) => {
+      setActiveTab(event.detail)
+    }
+
+    window.addEventListener("navigate-to-tab", handleNavigateToTab as EventListener)
+
+    return () => {
+      window.removeEventListener("navigate-to-tab", handleNavigateToTab as EventListener)
+    }
+  }, [])
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50 p-4">
